@@ -10,18 +10,18 @@ use crate::dunder_all::dunder_all_names;
 use crate::reachability::{ReachabilityConstraintsExtension, evaluate_reachability};
 use crate::types::narrow::NarrowingEvaluatorExtension;
 use crate::types::{
-    DynamicType, KnownClass, MemberLookupPolicy, Type, TypeAndQualifiers, TypeQualifiers,
-    UnionBuilder, UnionType, binding_type, declaration_type,
+    DynamicType, KnownClass, MemberLookupPolicy, RecursivelyDefined, Type, TypeAndQualifiers,
+    TypeQualifiers, UnionBuilder, UnionType, binding_type, declaration_type,
 };
 use crate::{Db, FxIndexSet, FxOrderSet, Program};
 use ty_python_core::definition::{Definition, DefinitionKind, DefinitionState};
 use ty_python_core::narrowing_constraints::ScopedNarrowingConstraint;
-use ty_python_core::place::{PlaceExprRef, ScopedPlaceId};
+use ty_python_core::place::ScopedPlaceId;
 use ty_python_core::predicate::{Predicate, ScopedPredicateId};
 use ty_python_core::reachability_constraints::{
     ReachabilityConstraints, ScopedReachabilityConstraintId,
 };
-use ty_python_core::scope::ScopeId;
+use ty_python_core::scope::{FileScopeId, ScopeId};
 use ty_python_core::{
     BindingWithConstraints, BindingWithConstraintsIterator, BoundnessAnalysis,
     DeclarationWithConstraint, DeclarationsIterator, Truthiness, get_loop_header, global_scope,
@@ -369,23 +369,6 @@ pub(crate) fn symbol<'db>(
         db,
         scope,
         name,
-        RequiresExplicitReExport::No,
-        considered_definitions,
-    )
-}
-
-/// Infer the public type of a place (its type as seen from outside its scope) in the given
-/// `scope`.
-pub(crate) fn place<'db>(
-    db: &'db dyn Db,
-    scope: ScopeId<'db>,
-    member: PlaceExprRef,
-    considered_definitions: ConsideredDefinitions,
-) -> PlaceAndQualifiers<'db> {
-    place_impl(
-        db,
-        scope,
-        member,
         RequiresExplicitReExport::No,
         considered_definitions,
     )
@@ -874,6 +857,63 @@ impl<'db> From<Place<'db>> for PlaceAndQualifiers<'db> {
     }
 }
 
+pub(crate) fn union_place_with_optional_inferred_type<'db>(
+    db: &'db dyn Db,
+    place: Place<'db>,
+    inferred_ty: Option<Type<'db>>,
+) -> Place<'db> {
+    let Some(inferred_ty) = inferred_ty else {
+        return place;
+    };
+
+    match place {
+        Place::Defined(defined) => Place::Defined(DefinedPlace {
+            ty: UnionType::from_two_elements(db, defined.ty, inferred_ty),
+            origin: defined.origin.merge(TypeOrigin::Inferred),
+            ..defined
+        }),
+        Place::Undefined => Place::bound(inferred_ty),
+    }
+}
+
+pub(crate) fn nested_binding_scopes_ty<'db>(
+    db: &'db dyn Db,
+    owner_scope: ScopeId<'db>,
+    symbol_name: &str,
+    nested_scopes: &[FileScopeId],
+    requires_explicit_reexport: RequiresExplicitReExport,
+) -> Option<Type<'db>> {
+    if nested_scopes.is_empty() {
+        return None;
+    }
+
+    let mut union = UnionBuilder::new(db).recursively_defined(RecursivelyDefined::Yes);
+    let mut has_nested_binding_type = false;
+
+    for &nested_scope_id in nested_scopes {
+        let nested_scope = nested_scope_id.to_scope_id(db, owner_scope.file(db));
+        let nested_place_table = place_table(db, nested_scope);
+        let Some(nested_symbol_id) = nested_place_table.symbol_id(symbol_name) else {
+            continue;
+        };
+
+        let use_def = use_def_map(db, nested_scope);
+        let bindings = use_def.reachable_bindings(nested_symbol_id.into());
+
+        let Some(ty) = place_from_bindings_impl(db, bindings, requires_explicit_reexport)
+            .place
+            .raw_type()
+        else {
+            continue;
+        };
+
+        union.add_in_place(ty);
+        has_nested_binding_type = true;
+    }
+
+    has_nested_binding_type.then(|| union.build())
+}
+
 #[salsa::tracked(
     cycle_initial=|_, id, _, _, _, _| Place::bound(Type::divergent(id)).into(),
     cycle_fn=|db, cycle, previous: &PlaceAndQualifiers<'db>, place: PlaceAndQualifiers<'db>, _, _, _, _| {
@@ -906,6 +946,18 @@ pub(crate) fn place_by_id<'db>(
         ConsideredDefinitions::AllReachable => use_def.reachable_bindings(place_id),
     };
 
+    let nested_binding_ty = || {
+        let symbol_id = place_id.as_symbol()?;
+        let symbol_name = place_table(db, scope).symbol(symbol_id).name();
+        nested_binding_scopes_ty(
+            db,
+            scope,
+            symbol_name.as_str(),
+            use_def.reachable_nested_binding_scopes(symbol_id),
+            requires_explicit_reexport,
+        )
+    };
+
     // If a symbol is undeclared, but qualified with `typing.Final`, we use the right-hand side
     // inferred type, without unioning with `Unknown`, because it cannot be modified.
     if let Some(qualifiers) = declared.is_bare_final() {
@@ -929,7 +981,12 @@ pub(crate) fn place_by_id<'db>(
             qualifiers,
         } if qualifiers.contains(TypeQualifiers::CLASS_VAR) => {
             let bindings = all_considered_bindings();
-            match place_from_bindings_impl(db, bindings, requires_explicit_reexport).place {
+            let inferred = union_place_with_optional_inferred_type(
+                db,
+                place_from_bindings_impl(db, bindings, requires_explicit_reexport).place,
+                nested_binding_ty(),
+            );
+            match inferred {
                 Place::Defined(DefinedPlace {
                     ty: inferred,
                     origin,
@@ -973,9 +1030,13 @@ pub(crate) fn place_by_id<'db>(
         } => {
             let bindings = all_considered_bindings();
             let boundness_analysis = bindings.boundness_analysis();
-            let inferred = place_from_bindings_impl(db, bindings, requires_explicit_reexport);
+            let inferred = union_place_with_optional_inferred_type(
+                db,
+                place_from_bindings_impl(db, bindings, requires_explicit_reexport).place,
+                nested_binding_ty(),
+            );
 
-            let place = match inferred.place {
+            let place = match inferred {
                 // Place is possibly undeclared and definitely unbound
                 Place::Undefined => {
                     // TODO: We probably don't want to report `AlwaysDefined` here. This requires a bit of
@@ -1017,6 +1078,7 @@ pub(crate) fn place_by_id<'db>(
             let boundness_analysis = bindings.boundness_analysis();
             let mut inferred =
                 place_from_bindings_impl(db, bindings, requires_explicit_reexport).place;
+            inferred = union_place_with_optional_inferred_type(db, inferred, nested_binding_ty());
 
             if boundness_analysis == BoundnessAnalysis::AssumeBound {
                 if let Place::Defined(defined) = inferred {
@@ -1192,29 +1254,6 @@ fn symbol_impl<'db>(
                 db,
                 scope,
                 symbol.into(),
-                requires_explicit_reexport,
-                considered_definitions,
-            )
-        })
-        .unwrap_or_default()
-}
-
-fn place_impl<'db>(
-    db: &'db dyn Db,
-    scope: ScopeId<'db>,
-    place: PlaceExprRef,
-    requires_explicit_reexport: RequiresExplicitReExport,
-    considered_definitions: ConsideredDefinitions,
-) -> PlaceAndQualifiers<'db> {
-    let _span = tracing::trace_span!("place_impl", ?place).entered();
-
-    place_table(db, scope)
-        .place_id(place)
-        .map(|place| {
-            place_by_id(
-                db,
-                scope,
-                place,
                 requires_explicit_reexport,
                 considered_definitions,
             )

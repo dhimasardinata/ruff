@@ -323,6 +323,9 @@ pub struct UseDefMap<'db> {
     /// [`Bindings`] reaching a [`ScopedUseId`].
     bindings_by_use: IndexVec<ScopedUseId, InternedBindingsId>,
 
+    /// Nested scopes that can bind the symbol at a [`ScopedUseId`].
+    nested_binding_scopes_by_use: IndexVec<ScopedUseId, Box<[FileScopeId]>>,
+
     /// [`Bindings`] for each member reaching a [`ScopedUseId`].
     ///
     /// This is only used for kwargs expressions, whose corresponding `bindings_by_use` entry
@@ -365,6 +368,9 @@ pub struct UseDefMap<'db> {
 
     /// All potentially reachable bindings and declarations, for each member.
     reachable_definitions_by_member: IndexVec<ScopedMemberId, ReachableDefinitions>,
+
+    /// All nested scopes that can bind each symbol.
+    reachable_nested_binding_scopes_by_symbol: IndexVec<ScopedSymbolId, Box<[FileScopeId]>>,
 
     /// Snapshot of bindings in this scope that can be used to resolve a reference in a nested
     /// scope.
@@ -437,6 +443,10 @@ impl<'db> UseDefMap<'db> {
             &self.interned_bindings[bindings_id],
             BoundnessAnalysis::BasedOnUnboundVisibility,
         )
+    }
+
+    pub fn nested_binding_scopes_at_use(&self, use_id: ScopedUseId) -> &[FileScopeId] {
+        &self.nested_binding_scopes_by_use[use_id]
     }
 
     pub fn multi_bindings_at_use(
@@ -563,6 +573,10 @@ impl<'db> UseDefMap<'db> {
     ) -> BindingWithConstraintsIterator<'_, 'db> {
         let bindings = &self.reachable_definitions_by_member[member].bindings;
         self.bindings_iterator(bindings, BoundnessAnalysis::AssumeBound)
+    }
+
+    pub fn reachable_nested_binding_scopes(&self, symbol: ScopedSymbolId) -> &[FileScopeId] {
+        &self.reachable_nested_binding_scopes_by_symbol[symbol]
     }
 
     pub(crate) fn enclosing_snapshot(
@@ -897,6 +911,7 @@ struct ReachableDefinitions {
 pub(super) struct FlowSnapshot {
     symbol_states: IndexVec<ScopedSymbolId, PlaceState>,
     member_states: IndexVec<ScopedMemberId, PlaceState>,
+    nested_binding_scopes_by_symbol: IndexVec<ScopedSymbolId, Vec<FileScopeId>>,
     reachability: ScopedReachabilityConstraintId,
 }
 
@@ -932,6 +947,9 @@ pub(super) struct UseDefMapBuilder<'db> {
     /// Live bindings at each so-far-recorded use.
     bindings_by_use: IndexVec<ScopedUseId, Bindings>,
 
+    /// Nested scopes that can bind the symbol at each so-far-recorded use.
+    nested_binding_scopes_by_use: IndexVec<ScopedUseId, Box<[FileScopeId]>>,
+
     /// Live bindings associated with each so-far-recorded use.
     ///
     /// Unlike `bindings_by_use`, this field supports associating multiple bindings with a
@@ -958,6 +976,9 @@ pub(super) struct UseDefMapBuilder<'db> {
 
     member_states: IndexVec<ScopedMemberId, PlaceState>,
 
+    /// Nested scopes that can bind each symbol at the current point in control flow.
+    nested_binding_scopes_by_symbol: IndexVec<ScopedSymbolId, Vec<FileScopeId>>,
+
     /// All potentially reachable bindings and declarations, for each place.
     reachable_symbol_definitions: IndexVec<ScopedSymbolId, ReachableDefinitions>,
 
@@ -979,6 +1000,7 @@ impl<'db> UseDefMapBuilder<'db> {
             predicates: PredicatesBuilder::default(),
             reachability_constraints: ReachabilityConstraintsBuilder::default(),
             bindings_by_use: IndexVec::new(),
+            nested_binding_scopes_by_use: IndexVec::new(),
             multi_bindings_by_use: FxHashMap::default(),
             reachability: ScopedReachabilityConstraintId::ALWAYS_TRUE,
             range_reachability: Vec::new(),
@@ -986,6 +1008,7 @@ impl<'db> UseDefMapBuilder<'db> {
             bindings_by_definition: FxHashMap::default(),
             symbol_states: IndexVec::new(),
             member_states: IndexVec::new(),
+            nested_binding_scopes_by_symbol: IndexVec::new(),
             reachable_member_definitions: IndexVec::new(),
             reachable_symbol_definitions: IndexVec::new(),
             enclosing_snapshots: EnclosingSnapshots::default(),
@@ -1031,6 +1054,8 @@ impl<'db> UseDefMapBuilder<'db> {
                         bindings: Bindings::unbound(self.reachability),
                         declarations: Declarations::undeclared(self.reachability),
                     });
+                debug_assert_eq!(symbol, new_place);
+                let new_place = self.nested_binding_scopes_by_symbol.push(Vec::new());
                 debug_assert_eq!(symbol, new_place);
             }
             ScopedPlaceId::Member(member) => {
@@ -1401,6 +1426,17 @@ impl<'db> UseDefMapBuilder<'db> {
         };
 
         self.record_use_bindings(bindings.clone(), use_id);
+
+        let nested_binding_scopes = match place {
+            ScopedPlaceId::Symbol(symbol) => self.nested_binding_scopes_by_symbol[symbol]
+                .clone()
+                .into_boxed_slice(),
+            ScopedPlaceId::Member(_) => Box::new([]),
+        };
+        let new_use = self
+            .nested_binding_scopes_by_use
+            .push(nested_binding_scopes);
+        debug_assert_eq!(use_id, new_use);
     }
 
     pub(super) fn record_multi_use(
@@ -1426,6 +1462,23 @@ impl<'db> UseDefMapBuilder<'db> {
 
         // Record a placeholder use of the parent expression to preserve the indices of `bindings_by_use`.
         self.record_use_bindings(Bindings::default(), use_id);
+        let new_use = self.nested_binding_scopes_by_use.push(Box::new([]));
+        debug_assert_eq!(use_id, new_use);
+    }
+
+    pub(super) fn record_nested_binding_scope(
+        &mut self,
+        symbol: ScopedSymbolId,
+        nested_scope: FileScopeId,
+    ) {
+        if self.reachability == ScopedReachabilityConstraintId::ALWAYS_FALSE {
+            return;
+        }
+
+        let nested_binding_scopes = &mut self.nested_binding_scopes_by_symbol[symbol];
+        if !nested_binding_scopes.contains(&nested_scope) {
+            nested_binding_scopes.push(nested_scope);
+        }
     }
 
     fn record_use_bindings(&mut self, bindings: Bindings, use_id: ScopedUseId) {
@@ -1562,6 +1615,7 @@ impl<'db> UseDefMapBuilder<'db> {
         FlowSnapshot {
             symbol_states: self.symbol_states.clone(),
             member_states: self.member_states.clone(),
+            nested_binding_scopes_by_symbol: self.nested_binding_scopes_by_symbol.clone(),
             reachability: self.reachability,
         }
     }
@@ -1593,6 +1647,7 @@ impl<'db> UseDefMapBuilder<'db> {
         // Restore the current visible-definitions state to the given snapshot.
         self.symbol_states = snapshot.symbol_states;
         self.member_states = snapshot.member_states;
+        self.nested_binding_scopes_by_symbol = snapshot.nested_binding_scopes_by_symbol;
         self.reachability = snapshot.reachability;
 
         // If the snapshot we are restoring is missing some places we've recorded since, we need
@@ -1603,6 +1658,9 @@ impl<'db> UseDefMapBuilder<'db> {
 
         self.member_states
             .resize(num_members, PlaceState::undefined(self.reachability));
+
+        self.nested_binding_scopes_by_symbol
+            .resize(num_symbols, Vec::new());
     }
 
     /// Merge the given snapshot into the current state, reflecting that we might have taken either
@@ -1656,6 +1714,18 @@ impl<'db> UseDefMapBuilder<'db> {
             }
         }
 
+        let mut snapshot_nested_binding_scopes_iter =
+            snapshot.nested_binding_scopes_by_symbol.into_iter();
+        for current in &mut self.nested_binding_scopes_by_symbol {
+            if let Some(snapshot) = snapshot_nested_binding_scopes_iter.next() {
+                for nested_scope in snapshot {
+                    if !current.contains(&nested_scope) {
+                        current.push(nested_scope);
+                    }
+                }
+            }
+        }
+
         self.reachability = self
             .reachability_constraints
             .add_or_constraint(self.reachability, snapshot.reachability);
@@ -1669,6 +1739,7 @@ impl<'db> UseDefMapBuilder<'db> {
         self.reachable_symbol_definitions.shrink_to_fit();
         self.reachable_member_definitions.shrink_to_fit();
         self.bindings_by_use.shrink_to_fit();
+        self.nested_binding_scopes_by_use.shrink_to_fit();
         self.multi_bindings_by_use.shrink_to_fit();
         self.range_reachability.shrink_to_fit();
         self.declarations_by_binding.shrink_to_fit();
@@ -1709,6 +1780,11 @@ impl<'db> UseDefMapBuilder<'db> {
             &mut interned_bindings,
             &mut interned_ids_by_bindings,
         );
+        let reachable_nested_binding_scopes_by_symbol = self
+            .nested_binding_scopes_by_symbol
+            .into_iter()
+            .map(Vec::into_boxed_slice)
+            .collect();
 
         interned_bindings.shrink_to_fit();
         interned_declarations.shrink_to_fit();
@@ -1762,12 +1838,14 @@ impl<'db> UseDefMapBuilder<'db> {
             interned_bindings,
             interned_declarations,
             bindings_by_use,
+            nested_binding_scopes_by_use: self.nested_binding_scopes_by_use,
             multi_bindings_by_use: self.multi_bindings_by_use,
             range_reachability: self.range_reachability,
             end_of_scope_symbols: self.symbol_states,
             end_of_scope_members,
             reachable_definitions_by_symbol: self.reachable_symbol_definitions,
             reachable_definitions_by_member: self.reachable_member_definitions,
+            reachable_nested_binding_scopes_by_symbol,
             declarations_by_binding,
             bindings_by_definition,
             enclosing_snapshots,

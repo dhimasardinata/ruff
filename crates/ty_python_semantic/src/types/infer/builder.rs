@@ -31,10 +31,11 @@ use super::{
 use crate::diagnostic::format_enumeration;
 use crate::place::{
     ConsideredDefinitions, DefinedPlace, Definedness, LookupError, Place, PlaceAndQualifiers,
-    TypeOrigin, builtins_module_scope, builtins_symbol, class_body_implicit_symbol,
-    explicit_global_symbol, global_symbol, loop_header_reachability,
-    module_type_implicit_global_declaration, module_type_implicit_global_symbol, place,
-    place_from_bindings, place_from_declarations, typing_extensions_symbol,
+    RequiresExplicitReExport, TypeOrigin, builtins_module_scope, builtins_symbol,
+    class_body_implicit_symbol, explicit_global_symbol, global_symbol, loop_header_reachability,
+    module_type_implicit_global_declaration, module_type_implicit_global_symbol,
+    nested_binding_scopes_ty, place_by_id, place_from_bindings, place_from_declarations,
+    typing_extensions_symbol, union_place_with_optional_inferred_type,
 };
 use crate::reachability::ReachabilityConstraintsExtension;
 use crate::types::add_inferred_python_version_hint_to_diagnostic;
@@ -8257,11 +8258,23 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         let mut constraint_keys = vec![];
         let (local_scope_place, use_id) = self.infer_local_place_load(place_expr, expr_ref);
+        let nested_binding_ty = use_id.and_then(|use_id| {
+            let symbol = place_expr.as_symbol()?;
+            nested_binding_scopes_ty(
+                db,
+                scope,
+                symbol.name(),
+                self.index
+                    .use_def_map(file_scope_id)
+                    .nested_binding_scopes_at_use(use_id),
+                RequiresExplicitReExport::No,
+            )
+        });
         if let Some(use_id) = use_id {
             constraint_keys.push((file_scope_id, ConstraintKey::UseId(use_id)));
         }
 
-        let place = PlaceAndQualifiers::from(local_scope_place).or_fall_back_to(db, || {
+        let mut place = PlaceAndQualifiers::from(local_scope_place).or_fall_back_to(db, || {
             let mut symbol_resolves_locally = false;
             if let Some(symbol) = place_expr.as_symbol()
                 && let Some(symbol_id) = place_table.symbol_id(symbol.name())
@@ -8435,10 +8448,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 // `ast::Stmt::AnnAssign` handling in `SemanticIndexBuilder::visit_stmt`.)
                 if enclosing_place.is_bound() || enclosing_place.is_declared() {
                     let local_place_and_qualifiers = eagerly_resolved_place.unwrap_or_else(|| {
-                        place(
+                        place_by_id(
                             db,
                             enclosing_scope_id,
-                            place_expr,
+                            enclosing_place_id,
+                            RequiresExplicitReExport::No,
                             ConsideredDefinitions::AllReachable,
                         )
                         .map_type(|ty| {
@@ -8554,6 +8568,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     })
                 })
         });
+
+        place.place = union_place_with_optional_inferred_type(db, place.place, nested_binding_ty);
 
         if let Some(ty) = place.place.ignore_possibly_undefined() {
             self.check_deprecated(expr_ref, ty);
