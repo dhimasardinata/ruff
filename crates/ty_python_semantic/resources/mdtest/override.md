@@ -185,6 +185,293 @@ class Foo:
     def bar(self): ...  # error: [invalid-explicit-override]
 ```
 
+## Missing `@override` decorator
+
+```toml
+[rules]
+all = "ignore"
+missing-override-decorator = "error"
+```
+
+This rule is intentionally limited to explicit, user-authored superclass behavior. It does not
+require `@override` for methods inherited from `object` or `type`, ty-generated methods, or
+interface-only protocol and abstract methods.
+
+```py
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing_extensions import Any, Protocol, overload, override
+
+class Parent:
+    attr = None
+
+    def method(self) -> int:
+        return 1
+
+    @property
+    def prop(self) -> int:
+        return 1
+
+    @classmethod
+    def class_method(cls) -> int:
+        return 1
+
+    @staticmethod
+    def static_method() -> int:
+        return 1
+
+    @overload
+    def overloaded(self, value: int) -> int: ...
+    @overload
+    def overloaded(self, value: str) -> str: ...
+    def overloaded(self, value: int | str) -> int | str:
+        return value
+
+class Child(Parent):
+    def method(self) -> int:  # error: [missing-override-decorator]
+        return 2
+
+    @property
+    def prop(self) -> int:  # error: [missing-override-decorator]
+        return 2
+
+    @classmethod
+    def class_method(cls) -> int:  # error: [missing-override-decorator]
+        return 2
+
+    @staticmethod
+    def static_method() -> int:  # error: [missing-override-decorator]
+        return 2
+
+class AttributeChild(Parent):
+    def attr(self) -> None:  # error: [missing-override-decorator]
+        pass
+
+class OverloadChild(Parent):
+    @overload
+    def overloaded(self, value: int) -> int: ...
+    @overload
+    def overloaded(self, value: str) -> str: ...
+    def overloaded(self, value: int | str) -> int | str:  # error: [missing-override-decorator]
+        return value
+
+# Implementing an interface-only protocol member does not require `@override`.
+class ProtocolInterface(Protocol):
+    def method(self) -> int: ...
+
+class ProtocolImplementation(ProtocolInterface):
+    def method(self) -> int:
+        return 1
+
+class ConcreteMixin:
+    def method(self) -> int:
+        return 1
+
+# This example overrides the method from `ConcreteMixin`, which is not exempt
+# from the missing @override decorator rule even though ProtocolInterface is.
+class ProtocolBeforeConcrete(ProtocolInterface, ConcreteMixin):
+    def method(self) -> int:  # error: [missing-override-decorator]
+        return 2
+
+# A protocol member with a concrete default is user-authored behavior, so overriding it does require
+# `@override`.
+class ProtocolWithDefault(Protocol):
+    def method(self) -> int:
+        return 1
+
+class ProtocolDefaultOverride(ProtocolWithDefault):
+    def method(self) -> int:  # error: [missing-override-decorator]
+        return 2
+
+# Implementing an abstract interface method does not require `@override`.
+class AbstractInterface(ABC):
+    @abstractmethod
+    def method(self) -> int: ...
+
+class AbstractImplementation(AbstractInterface):
+    def method(self) -> int:
+        return 1
+
+# This example overrides the method from `ConcreteMixin`, which is not exempt
+# from the missing @override decorator rule even though AbstractInterface is.
+class AbstractBeforeConcrete(AbstractInterface, ConcreteMixin):
+    def method(self) -> int:  # error: [missing-override-decorator]
+        return 2
+
+# Abstract methods with default bodies are still interface targets.
+class AbstractInterfaceWithDefault(ABC):
+    @abstractmethod
+    def method(self) -> int:
+        return 1
+
+class AbstractDefaultImplementation(AbstractInterfaceWithDefault):
+    def method(self) -> int:
+        return 2
+
+# Concrete ABC methods are not exempt.
+class AbstractBaseWithConcreteMethod(ABC):
+    def method(self) -> int:
+        return 1
+
+class ConcreteABCOverride(AbstractBaseWithConcreteMethod):
+    def method(self) -> int:  # error: [missing-override-decorator]
+        return 2
+
+class ExplicitChild(Parent):
+    @override
+    def method(self) -> int:
+        return 2
+
+    @property
+    @override
+    def prop(self) -> int:
+        return 2
+
+    @override
+    def attr(self) -> None:
+        pass
+
+    @overload
+    def overloaded(self, value: int) -> int: ...
+    @overload
+    def overloaded(self, value: str) -> str: ...
+    @override
+    def overloaded(self, value: int | str) -> int | str:
+        return value
+
+class OverrideOnOverload(Parent):
+    @overload
+    @override
+    def overloaded(self, value: int) -> int: ...
+    @overload
+    def overloaded(self, value: str) -> str: ...
+    def overloaded(self, value: int | str) -> int | str:  # error: [missing-override-decorator]
+        return value
+
+class OverrideOnImplementation(Parent):
+    @overload
+    def overloaded(self, value: int) -> int: ...
+    @overload
+    def overloaded(self, value: str) -> str: ...
+    @override
+    def overloaded(self, value: int | str) -> int | str:
+        return value
+
+# Overrides of `object` methods are exempt.
+class Repr:
+    def __repr__(self) -> str:
+        return "Repr"
+
+# Overrides of `type` methods are exempt.
+class Meta(type):
+    def __call__(cls) -> object:
+        return object()
+
+    def __new__(
+        mcls,
+        name: str,
+        bases: tuple[type, ...],
+        namespace: dict[str, object],
+    ) -> "Meta":
+        return super().__new__(mcls, name, bases, namespace)
+
+    def __or__(cls, other: object) -> object:
+        return cls
+
+class ConstructorParent:
+    def __init__(self, value: int) -> None:
+        pass
+
+    def __new__(cls, value: int) -> "ConstructorParent":
+        raise NotImplementedError
+
+class ConstructorChild(ConstructorParent):
+    def __init__(self, value: str) -> None:  # error: [missing-override-decorator]
+        pass
+
+    def __new__(cls, value: str) -> "ConstructorChild":  # error: [missing-override-decorator]
+        raise NotImplementedError
+
+# Overrides of ty-generated dataclass members are exempt.
+@dataclass
+class DataClassParent:
+    field: int
+
+class DataClassChild(DataClassParent):
+    def __init__(self, field: str) -> None:
+        self.field = 1
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+class DynamicParent(Any): ...
+
+class DynamicChild(DynamicParent):
+    def method(self) -> int:
+        return 1
+```
+
+`stub.pyi`:
+
+```pyi
+from abc import ABC, abstractmethod
+from typing_extensions import Protocol, overload, override
+
+class StubParent:
+    @overload
+    def method(self, value: int) -> int: ...
+    @overload
+    def method(self, value: str) -> str: ...
+
+class StubChild(StubParent):
+    @overload
+    def method(self, value: int) -> int: ...  # error: [missing-override-decorator]
+    @overload
+    def method(self, value: str) -> str: ...
+
+class ExplicitStubChild(StubParent):
+    @overload
+    @override
+    def method(self, value: int) -> int: ...
+    @overload
+    def method(self, value: str) -> str: ...
+
+class OverrideOnSecondOverload(StubParent):
+    @overload
+    def method(self, value: int) -> int: ...  # error: [missing-override-decorator]
+    @overload
+    @override
+    def method(self, value: str) -> str: ...
+
+class OverrideOnFirstOverload(StubParent):
+    @overload
+    @override
+    def method(self, value: int) -> int: ...
+    @overload
+    def method(self, value: str) -> str: ...
+
+class StubProtocolInterface(Protocol):
+    def method(self) -> int: ...
+
+class StubProtocolImplementation(StubProtocolInterface):
+    def method(self) -> int: ...
+
+class StubAbstractInterface(ABC):
+    @abstractmethod
+    def method(self) -> int: ...
+
+class StubAbstractImplementation(StubAbstractInterface):
+    def method(self) -> int: ...
+
+class StubConstructorParent:
+    def __init__(self, value: int) -> None: ...
+    def __new__(cls, value: int) -> "StubConstructorParent": ...
+
+class StubConstructorChild(StubConstructorParent):
+    def __init__(self, value: str) -> None: ...  # error: [missing-override-decorator]
+    def __new__(cls, value: str) -> "StubConstructorChild": ...  # error: [missing-override-decorator]
+```
+
 ## Possibly-unbound definitions
 
 ```py
