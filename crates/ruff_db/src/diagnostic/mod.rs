@@ -75,6 +75,8 @@ impl Diagnostic {
             noqa_offset: None,
             secondary_code: None,
             header_offset: 0,
+            #[cfg(feature = "testing")]
+            custom_suppression_span: None,
         });
         Diagnostic { inner }
     }
@@ -145,6 +147,31 @@ impl Diagnostic {
     /// primary annotations is allowed, but its rendering may be sub-optimal.
     pub fn annotate(&mut self, ann: Annotation) {
         Arc::make_mut(&mut self.inner).annotations.push(ann);
+    }
+
+    /// Sets the suppression span for this diagnostic.
+    ///
+    /// This method is only used for our internal testing purposes.
+    /// In production, a diagnostic should never be created at all if it is
+    /// suppressed using a noqa comment or `ty: ignore` comment (etc.),
+    /// so the suppression span should never be relevant.
+    #[cfg(feature = "testing")]
+    pub fn set_suppression_span(&mut self, span: Span) {
+        Arc::make_mut(&mut self.inner).custom_suppression_span = Some(span);
+    }
+
+    /// Returns the suppression span for this diagnostic.
+    ///
+    /// This method is only used for our internal testing purposes.
+    /// In production, a diagnostic should never be created at all if it is
+    /// suppressed using a noqa comment or `ty: ignore` comment (etc.),
+    /// so the suppression span should never be relevant.
+    #[cfg(feature = "testing")]
+    pub fn suppression_span(&self) -> Option<Span> {
+        self.inner
+            .custom_suppression_span
+            .clone()
+            .or_else(|| self.primary_span())
     }
 
     /// Adds an "info" sub-diagnostic with the given message.
@@ -540,6 +567,8 @@ struct DiagnosticInner {
     noqa_offset: Option<TextSize>,
     secondary_code: Option<SecondaryCode>,
     header_offset: usize,
+    #[cfg(feature = "testing")]
+    custom_suppression_span: Option<Span>,
 }
 
 struct RenderingSortKey<'a> {

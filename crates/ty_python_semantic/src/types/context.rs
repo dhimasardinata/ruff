@@ -399,6 +399,8 @@ pub(super) struct LintDiagnosticGuardBuilder<'db, 'ctx> {
     severity: Severity,
     source: LintSource,
     primary_range: TextRange,
+    #[cfg(feature = "testing")]
+    suppression_range: TextRange,
 }
 
 impl<'db, 'ctx> LintDiagnosticGuardBuilder<'db, 'ctx> {
@@ -472,7 +474,17 @@ impl<'db, 'ctx> LintDiagnosticGuardBuilder<'db, 'ctx> {
             severity,
             source,
             primary_range: range,
+            #[cfg(feature = "testing")]
+            suppression_range: range,
         })
+    }
+
+    /// In some cases, it may be desirable for the range of a diagnostic's primary
+    /// annotation to differ from the diagnostic's suppression range. In these cases,
+    /// callers can use this method to update the primary range on the builder
+    /// before building the diagnostic.
+    pub(super) fn set_primary_range(&mut self, range: TextRange) {
+        self.primary_range = range;
     }
 
     /// Create a new lint diagnostic guard.
@@ -498,6 +510,13 @@ impl<'db, 'ctx> LintDiagnosticGuardBuilder<'db, 'ctx> {
         // message. So the messages are likely to be quite confusable.
         let primary_span = Span::from(self.ctx.file()).with_range(self.primary_range);
         diag.annotate(Annotation::primary(primary_span));
+
+        #[cfg(feature = "testing")]
+        {
+            let suppression_span = Span::from(self.ctx.file()).with_range(self.suppression_range);
+            diag.set_suppression_span(suppression_span);
+        }
+
         LintDiagnosticGuard {
             ctx: self.ctx,
             source: self.source,

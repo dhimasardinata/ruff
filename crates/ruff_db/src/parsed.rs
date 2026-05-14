@@ -78,7 +78,7 @@ pub fn parsed_string_annotation(
         };
 
         ParseError {
-            error: ParseErrorType::OtherError(message),
+            error: ParseErrorType::StringAnnotationError(message),
             location: string.range,
         }
     })?;
