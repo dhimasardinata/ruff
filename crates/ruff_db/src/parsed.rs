@@ -60,20 +60,20 @@ pub fn parsed_string_annotation(
     indexed::ensure_indexed(&expr, string.node_index().load()).map_err(|err| {
         let message = match err {
             NodeIndexError::NoParent => {
-                "internal error: string annotation's parent had no NodeIndex".to_owned()
+                "Internal error: string annotation's parent had no NodeIndex".to_owned()
             }
-            NodeIndexError::TooNested => "too many levels of nested string annotations; remove the redundant nested quotes".to_owned(),
+            NodeIndexError::TooNested => "Too many levels of nested string annotations; remove the redundant nested quotes".to_owned(),
             NodeIndexError::OverflowedIndices => {
-                "file too long for string annotations; either break up the file or don't use string annotations".to_owned()
+                "File too long for string annotations; either break up the file or don't use string annotations".to_owned()
             }
             NodeIndexError::OverflowedSubIndices => {
-                "file too long for nested string annotations; remove the redundant nested quotes".to_owned()
+                "File too long for nested string annotations; remove the redundant nested quotes".to_owned()
             }
             NodeIndexError::ExhaustedSubIndices => {
-                "string annotation is too long; consider introducing type aliases to simplify".to_owned()
+                "String annotation is too long; consider introducing type aliases to simplify".to_owned()
             }
             NodeIndexError::ExhaustedSubSubIndices => {
-                "nested string annotation is too long; remove the redundant nested quotes".to_owned()
+                "Nested string annotation is too long; remove the redundant nested quotes".to_owned()
             }
         };
 

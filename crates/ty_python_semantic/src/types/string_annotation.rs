@@ -156,8 +156,10 @@ pub(crate) fn parse_string_annotation(
                         context.report_lint(&INVALID_SYNTAX_IN_FORWARD_ANNOTATION, string_literal)
                     {
                         builder.set_primary_range(location);
-                        let mut diagnostic = builder
-                            .into_diagnostic(format_args!("Syntax error in forward annotation"));
+
+                        let mut diagnostic =
+                            builder.into_diagnostic("Syntax error in forward annotation");
+
                         diagnostic.set_primary_message(&error);
 
                         let possible_secondary = string_literal

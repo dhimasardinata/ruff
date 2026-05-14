@@ -305,7 +305,7 @@ error[invalid-syntax-in-forward-annotation]: Syntax error in forward annotation
  --> src/mdtest_snippet.py:4:8
   |
 4 | c: """'"int"'""" = 1
-  |        ^^^^^ too many levels of nested string annotations; remove the redundant nested quotes
+  |        ^^^^^ Too many levels of nested string annotations; remove the redundant nested quotes
   |
 
 
@@ -313,7 +313,7 @@ error[invalid-syntax-in-forward-annotation]: Syntax error in forward annotation
  --> src/mdtest_snippet.py:9:5
   |
 9 | f: "'str | int | bool | Foo | Bar'" = 1
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ nested string annotation is too long; remove the redundant nested quotes
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Nested string annotation is too long; remove the redundant nested quotes
   |
 ```
 
