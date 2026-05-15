@@ -26,7 +26,7 @@ impl<'a> SortedDiagnostics<'a> {
             .into_iter()
             .map(|diagnostic| DiagnosticWithLine {
                 line_number: diagnostic
-                    .suppression_span()
+                    .primary_span()
                     .and_then(|span| span.range())
                     .map_or(OneIndexed::from_zero_indexed(0), |range| {
                         line_index.line_index(range.start())

@@ -64,6 +64,10 @@ impl<'s> InlineFileAssertions<'s> {
         while let Some(ranged_assertion) = file_assertions.next() {
             let mut collector = AssertionVec::new();
             let mut line_number = file_index.line_index(ranged_assertion.start());
+            let mut target_range = TextRange::new(
+                file_index.line_start(line_number, source),
+                ranged_assertion.end(),
+            );
 
             // Collect all own-line comments on consecutive lines; these all apply to the same line of
             // code. For example:
@@ -90,6 +94,10 @@ impl<'s> InlineFileAssertions<'s> {
                 }) {
                     if !CommentRanges::is_own_line(ranged_assertion.start(), source) {
                         only_own_line = false;
+                        target_range = TextRange::new(
+                            file_index.line_start(line_number, source),
+                            ranged_assertion.end(),
+                        );
                     }
 
                     collector.push(ranged_assertion.into_comment());
@@ -112,6 +120,10 @@ impl<'s> InlineFileAssertions<'s> {
                 if only_own_line {
                     // The collected comments apply to the _next_ line in the code.
                     line_number = line_number.saturating_add(1);
+                    target_range = TextRange::new(
+                        file_index.line_start(line_number, source),
+                        file_index.line_end_exclusive(line_number, source),
+                    );
                 }
             } else {
                 // We have a line-trailing comment; it applies to its own line, and is not grouped.
@@ -120,6 +132,7 @@ impl<'s> InlineFileAssertions<'s> {
 
             by_line.push(LineAssertions {
                 line_number,
+                target_range,
                 assertions: collector,
             });
         }
@@ -201,6 +214,13 @@ pub(crate) struct LineAssertions<'a> {
     /// Not necessarily the same line the assertion comment is located on; for an own-line comment,
     /// it's the next non-assertion line.
     pub(crate) line_number: OneIndexed,
+
+    /// The source range these assertions refer to.
+    ///
+    /// For end-of-line assertions, this starts at the beginning of the physical line and ends at
+    /// the assertion comment. For own-line assertion stacks, this is the physical line range of the
+    /// following line.
+    pub(crate) target_range: TextRange,
 
     /// The assertions referring to this line.
     pub(crate) assertions: AssertionVec<'a>,

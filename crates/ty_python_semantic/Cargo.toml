@@ -72,7 +72,7 @@ serde = [
     "ruff_python_ast/serde",
     "ty_python_core/serde",
 ]
-testing = ["ruff_db/testing"]
+testing = []
 
 [[test]]
 name = "mdtest"

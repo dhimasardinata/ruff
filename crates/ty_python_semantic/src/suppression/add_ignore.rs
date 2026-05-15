@@ -33,7 +33,7 @@ pub fn suppress_all(
     // Compute the full suppression ranges for each diagnostic.
     let mut ids_full_range: Vec<_> = ids_with_range
         .iter()
-        .map(|&(id, range)| (id, suppression_range(db, file, range)))
+        .map(|&(id, range)| (id, diagnostic_suppression_range(db, file, range)))
         .collect();
 
     // Sort the suppression ranges by their start position and length (end position).
@@ -161,7 +161,7 @@ pub struct SuppressFix {
 
 /// Creates a fix to suppress a single lint.
 pub fn suppress_single(db: &dyn Db, file: File, id: LintId, range: TextRange) -> Fix {
-    let suppression_range = suppression_range(db, file, range);
+    let suppression_range = diagnostic_suppression_range(db, file, range);
 
     let suppressions = suppressions(db, file);
     let source = source_text(db, file);
@@ -194,7 +194,7 @@ pub fn suppress_single(db: &dyn Db, file: File, id: LintId, range: TextRange) ->
 /// * If `range` is within a single-line interpolated expression, then the start and end are extended to the start and end of the enclosing interpolated string.
 /// * If there's a line continuation, then the suppression range is extended to include the following line too.
 /// * If there's a multiline string, then the suppression range is extended to cover the starting and ending line of the multiline string.
-fn suppression_range(db: &dyn Db, file: File, range: TextRange) -> TextRange {
+pub fn diagnostic_suppression_range(db: &dyn Db, file: File, range: TextRange) -> TextRange {
     // Always insert a new suppression at the end of the range to avoid having to deal with multiline strings
     // etc. Also make sure to not pass a sub-token range to `Tokens::after`.
     let parsed = parsed_module(db, file).load(db);

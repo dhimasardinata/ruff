@@ -26,6 +26,7 @@ pub use suppression::{
     SuppressFix, UNUSED_IGNORE_COMMENT, is_unused_ignore_comment_lint, suppress_all,
     suppress_single,
 };
+pub use suppression::{diagnostic_suppression_range, suppression_range_matches_diagnostic};
 use ty_module_resolver::ModuleGlobSet;
 use ty_python_core::definition::docstring_from_body;
 use ty_python_core::platform::PythonPlatform;

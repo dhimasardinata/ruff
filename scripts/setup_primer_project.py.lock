@@ -2,6 +2,9 @@ version = 1
 revision = 3
 requires-python = ">=3.11"
 
+[options]
+exclude-newer = "2026-05-08T13:21:10Z"
+
 [manifest]
 requirements = [{ name = "mypy-primer", git = "https://github.com/hauntsaninja/mypy_primer" }]
 
