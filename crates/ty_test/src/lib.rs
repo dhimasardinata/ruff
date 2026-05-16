@@ -329,11 +329,11 @@ fn run_test(
                 }
             };
 
-            let failure = match matcher::match_file_with_assertion_range_mapper(
+            let failure = match matcher::match_file(
                 db,
                 test_file.file,
-                &diagnostics,
-                |range| ty_python_semantic::diagnostic_suppression_range(db, test_file.file, range),
+                diagnostics.clone(),
+                |range| ty_python_semantic::suppression_range(db, test_file.file, range),
                 ty_python_semantic::suppression_range_matches_diagnostic,
             )
             .and_then(|inline_diagnostics| {

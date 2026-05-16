@@ -2,9 +2,7 @@
 //! messages for any mismatches.
 
 use std::borrow::Cow;
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Range;
 use std::sync::LazyLock;
 
 use colored::Colorize;
@@ -19,31 +17,21 @@ use ruff_text_size::TextRange;
 use smallvec::SmallVec;
 
 use crate::assertion::{InlineFileAssertions, LineAssertions, ParsedAssertion, UnparsedAssertion};
-use crate::diagnostic::SortedDiagnostics;
 
 #[derive(Debug, Default)]
 pub struct FailuresByLine {
-    failures: Vec<Failure>,
-    lines: Vec<LineFailures>,
+    lines: BTreeMap<OneIndexed, Vec<Failure>>,
 }
 
 impl FailuresByLine {
     pub fn iter(&self) -> impl Iterator<Item = (OneIndexed, &[Failure])> {
-        self.lines.iter().map(|line_failures| {
-            (
-                line_failures.line_number,
-                &self.failures[line_failures.range.clone()],
-            )
-        })
+        self.lines
+            .iter()
+            .map(|(&line_number, failures)| (line_number, failures.as_slice()))
     }
 
     pub fn push(&mut self, line_number: OneIndexed, messages: Vec<Failure>) {
-        let start = self.failures.len();
-        self.failures.extend(messages);
-        self.lines.push(LineFailures {
-            line_number,
-            range: start..self.failures.len(),
-        });
+        self.lines.entry(line_number).or_default().extend(messages);
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -83,101 +71,24 @@ impl Failure {
     }
 }
 
-#[derive(Debug)]
-struct LineFailures {
-    line_number: OneIndexed,
-    range: Range<usize>,
-}
-
+/// Match the diagnostics emitted for `file` against its inline assertions.
+///
+/// Matched diagnostics are removed from `unmatched`. If every assertion and
+/// diagnostic matches, this function returns the diagnostics matched by
+/// `# snapshot` assertions so their inline snapshots can be validated.
+///
+/// Each assertion has a target range: an end-of-line assertion targets that
+/// line, while a standalone assertion comment targets the following line.
+/// `map_assertion_range` lets callers adjust that target before matching. For
+/// example, a caller can widen the range from the first line of a parenthesized
+/// expression to the full expression, so an assertion above the opening line can
+/// match a diagnostic reported on a later line. After that adjustment,
+/// `range_matches_diagnostic` decides whether each diagnostic is close enough
+/// to the adjusted assertion range to be matched by the assertion.
 pub fn match_file(
     db: &dyn Db,
     file: File,
-    diagnostics: &[Diagnostic],
-) -> Result<Vec<Diagnostic>, FailuresByLine> {
-    // Parse assertions from comments in the file, and get diagnostics from the file; both
-    // ordered by line number.
-    let source = source_text(db, file);
-    let parsed = parsed_module(db, file).load(db);
-    let assertions = InlineFileAssertions::from_file(&source, &parsed, &line_index(db, file));
-
-    let diagnostics = SortedDiagnostics::new(diagnostics, &line_index(db, file));
-
-    let mut line_diagnostics = diagnostics.iter_lines();
-
-    // Get iterators over assertions and diagnostics grouped by line, in ascending line order.
-    let mut line_assertions = assertions.into_iter();
-    let mut current_assertions = line_assertions.next();
-    let mut current_diagnostics = line_diagnostics.next();
-
-    let matcher = Matcher::from_file(db, file);
-    let mut failures = FailuresByLine::default();
-    let mut snapshot_diagnostics: Vec<Diagnostic> = Vec::new();
-
-    loop {
-        match (&current_assertions, &current_diagnostics) {
-            (Some(assertions), Some(diagnostics)) => {
-                match assertions.line_number.cmp(&diagnostics.line_number) {
-                    Ordering::Equal => {
-                        // We have assertions and diagnostics on the same line; check for
-                        // matches and error on any that don't match, then advance both
-                        // iterators.
-                        match matcher.match_line(diagnostics, assertions) {
-                            Ok(inline_diagnostics) => {
-                                snapshot_diagnostics.extend(inline_diagnostics);
-                            }
-                            Err(messages) => {
-                                failures.push(assertions.line_number, messages);
-                            }
-                        }
-
-                        current_assertions = line_assertions.next();
-                        current_diagnostics = line_diagnostics.next();
-                    }
-                    Ordering::Less => {
-                        // We have assertions on an earlier line than diagnostics; report these
-                        // assertions as all unmatched, and advance the assertions iterator.
-                        failures.push(assertions.line_number, unmatched(&assertions.assertions));
-                        current_assertions = line_assertions.next();
-                    }
-                    Ordering::Greater => {
-                        // We have diagnostics on an earlier line than assertions; report these
-                        // diagnostics as all unmatched, and advance the diagnostics iterator.
-                        failures.push(diagnostics.line_number, unmatched(diagnostics));
-                        current_diagnostics = line_diagnostics.next();
-                    }
-                }
-            }
-            (Some(assertions), None) => {
-                // We've exhausted diagnostics but still have assertions; report these assertions
-                // as unmatched and advance the assertions iterator.
-                failures.push(assertions.line_number, unmatched(&assertions.assertions));
-                current_assertions = line_assertions.next();
-            }
-            (None, Some(diagnostics)) => {
-                // We've exhausted assertions but still have diagnostics; report these
-                // diagnostics as unmatched and advance the diagnostics iterator.
-                failures.push(diagnostics.line_number, unmatched(diagnostics));
-                current_diagnostics = line_diagnostics.next();
-            }
-            // When we've exhausted both diagnostics and assertions, break.
-            (None, None) => break,
-        }
-    }
-
-    if failures.is_empty() {
-        // We need to re-sort the diagnostics because matching uses `swap_remove` internally, which can change ordering.
-        snapshot_diagnostics
-            .sort_unstable_by(|a, b| a.rendering_sort_key(db).cmp(&b.rendering_sort_key(db)));
-        Ok(snapshot_diagnostics)
-    } else {
-        Err(failures)
-    }
-}
-
-pub fn match_file_with_assertion_range_mapper(
-    db: &dyn Db,
-    file: File,
-    diagnostics: &[Diagnostic],
+    mut unmatched: Vec<Diagnostic>,
     map_assertion_range: impl Fn(TextRange) -> TextRange,
     range_matches_diagnostic: impl Fn(TextRange, TextRange) -> bool,
 ) -> Result<Vec<Diagnostic>, FailuresByLine> {
@@ -186,19 +97,22 @@ pub fn match_file_with_assertion_range_mapper(
     let assertions = InlineFileAssertions::from_file(&source, &parsed, &line_index(db, file));
 
     let matcher = Matcher::from_file(db, file);
-    let mut unmatched: Vec<_> = diagnostics.iter().collect();
-    let mut failures = FailureCollector::default();
+    let mut failures = FailuresByLine::default();
     let mut assertion_lines = BTreeSet::new();
     let mut snapshot_diagnostics: Vec<Diagnostic> = Vec::new();
 
     for assertions in assertions {
         assertion_lines.insert(assertions.line_number);
-        // Some parser diagnostics point at the line ending. The mapper still
-        // receives the line body, keeping ordinary line-local assertions from
-        // claiming diagnostics on the next code line.
+        // Pass `map_assertion_range` the range selected by the assertion
+        // parser: either the line with the assertion comment, or the following
+        // line for a standalone assertion comment. After that callback runs,
+        // we expand the range further to include the following line ending.
+        // This lets assertions match parser diagnostics, which can be reported
+        // at the newline following a syntax error, without making the default
+        // one-line matching behavior include the next code line.
         let assertion_range = map_assertion_range(assertions.target_range)
             .cover_offset(matcher.line_index.line_end(assertions.line_number, &source));
-        match matcher.match_line_by_range(
+        match matcher.match_line(
             &mut unmatched,
             &assertions,
             assertion_range,
@@ -213,10 +127,10 @@ pub fn match_file_with_assertion_range_mapper(
         }
     }
 
-    for diagnostic in unmatched {
+    for diagnostic in &unmatched {
         let line_number = matcher
             .line_index
-            .line_index(Matcher::diagnostic_range(diagnostic).start());
+            .line_index(diagnostic_range(diagnostic).start());
         let failure = if assertion_lines.contains(&line_number) {
             diagnostic.unmatched_with_column(matcher.column(diagnostic))
         } else {
@@ -226,46 +140,17 @@ pub fn match_file_with_assertion_range_mapper(
     }
 
     if failures.is_empty() {
+        // We need to re-sort the diagnostics because matching uses `swap_remove` internally, which can change ordering.
         snapshot_diagnostics
             .sort_unstable_by(|a, b| a.rendering_sort_key(db).cmp(&b.rendering_sort_key(db)));
         Ok(snapshot_diagnostics)
     } else {
-        Err(failures.into_failures_by_line())
-    }
-}
-
-#[derive(Default)]
-struct FailureCollector {
-    by_line: BTreeMap<OneIndexed, Vec<Failure>>,
-}
-
-impl FailureCollector {
-    fn push(&mut self, line_number: OneIndexed, messages: Vec<Failure>) {
-        self.by_line
-            .entry(line_number)
-            .or_default()
-            .extend(messages);
-    }
-
-    fn is_empty(&self) -> bool {
-        self.by_line.is_empty()
-    }
-
-    fn into_failures_by_line(self) -> FailuresByLine {
-        let mut failures = FailuresByLine::default();
-        for (line_number, messages) in self.by_line {
-            failures.push(line_number, messages);
-        }
-        failures
+        Err(failures)
     }
 }
 
 trait Unmatched {
     fn unmatched(&self) -> Failure;
-}
-
-fn unmatched<'a, T: Unmatched + 'a>(unmatched: &'a [T]) -> Vec<Failure> {
-    unmatched.iter().map(Unmatched::unmatched).collect()
 }
 
 trait UnmatchedWithColumn {
@@ -387,6 +272,13 @@ fn normalize_paths(ty: &str) -> Cow<'_, str> {
     PATH_IN_CLASS_DISPLAY_REGEX.replace_all(ty, normalize_path_captures)
 }
 
+fn diagnostic_range(diagnostic: &Diagnostic) -> TextRange {
+    diagnostic
+        .primary_span()
+        .and_then(|span| span.range())
+        .unwrap_or_default()
+}
+
 struct Matcher {
     line_index: LineIndex,
     source: SourceText,
@@ -400,60 +292,14 @@ impl Matcher {
         }
     }
 
-    /// Check a slice of [`Diagnostic`]s against a slice of
-    /// [`UnparsedAssertion`]s.
+    /// Try to match every assertion for one line against `unmatched`.
     ///
-    /// Return vector of [`Unmatched`] for any unmatched diagnostics or
-    /// assertions.
-    fn match_line<'a, 'b>(
+    /// Matched diagnostics are removed from `unmatched`. Only diagnostics whose range matches
+    /// `assertion_range` are considered. Returns diagnostics matched by `# snapshot` assertions,
+    /// or the assertion failures for this line.
+    fn match_line(
         &self,
-        diagnostics: &'a [&'a Diagnostic],
-        assertions: &LineAssertions,
-    ) -> Result<SmallVec<[Diagnostic; 2]>, Vec<Failure>>
-    where
-        'b: 'a,
-    {
-        let mut failures = vec![];
-        let mut unmatched = diagnostics.to_vec();
-        let mut snapshot_diagnostics: SmallVec<[Diagnostic; 2]> = SmallVec::new();
-        for assertion in &assertions.assertions {
-            match assertion.parse() {
-                Ok(assertion) => {
-                    match self.matches_with_filter(&assertion, &mut unmatched, |_| true) {
-                        Some(diagnostic) => {
-                            if matches!(assertion, ParsedAssertion::Snapshot(_)) {
-                                snapshot_diagnostics.push(diagnostic);
-                            }
-                        }
-                        None => {
-                            failures.push(assertion.unmatched());
-                        }
-                    }
-                }
-                Err(error) => {
-                    failures.push(Failure::new(format_args!(
-                        "{} {}",
-                        "invalid assertion:".red(),
-                        error
-                    )));
-                }
-            }
-        }
-
-        for diagnostic in unmatched {
-            failures.push(diagnostic.unmatched_with_column(self.column(diagnostic)));
-        }
-
-        if failures.is_empty() {
-            Ok(snapshot_diagnostics)
-        } else {
-            Err(failures)
-        }
-    }
-
-    fn match_line_by_range(
-        &self,
-        unmatched: &mut Vec<&Diagnostic>,
+        unmatched: &mut Vec<Diagnostic>,
         assertions: &LineAssertions,
         assertion_range: TextRange,
         range_matches_diagnostic: &impl Fn(TextRange, TextRange) -> bool,
@@ -462,29 +308,18 @@ impl Matcher {
         let mut snapshot_diagnostics: SmallVec<[Diagnostic; 2]> = SmallVec::new();
         for assertion in &assertions.assertions {
             match assertion.parse() {
-                Ok(assertion) => {
-                    let diagnostic_matches_assertion_range = |diagnostic: &Diagnostic| {
-                        range_matches_diagnostic(
-                            assertion_range,
-                            Self::diagnostic_range(diagnostic),
-                        )
-                    };
-
-                    match self.matches_with_filter(
-                        &assertion,
-                        unmatched,
-                        diagnostic_matches_assertion_range,
-                    ) {
-                        Some(diagnostic) => {
-                            if matches!(assertion, ParsedAssertion::Snapshot(_)) {
-                                snapshot_diagnostics.push(diagnostic);
-                            }
-                        }
-                        None => {
-                            failures.push(assertion.unmatched());
+                Ok(assertion) => match self.matches(&assertion, unmatched, |diagnostic| {
+                    range_matches_diagnostic(assertion_range, diagnostic_range(diagnostic))
+                }) {
+                    Some(diagnostic) => {
+                        if matches!(assertion, ParsedAssertion::Snapshot(_)) {
+                            snapshot_diagnostics.push(diagnostic);
                         }
                     }
-                }
+                    None => {
+                        failures.push(assertion.unmatched());
+                    }
+                },
                 Err(error) => {
                     failures.push(Failure::new(format_args!(
                         "{} {}",
@@ -514,27 +349,21 @@ impl Matcher {
             .unwrap_or(OneIndexed::from_zero_indexed(0))
     }
 
-    fn diagnostic_range(diagnostic: &Diagnostic) -> TextRange {
-        diagnostic
-            .primary_span()
-            .and_then(|span| span.range())
-            .unwrap_or_default()
-    }
-
     /// Check if `assertion` matches any [`Diagnostic`]s in `unmatched`.
     ///
-    /// If so, return `Some` and remove the matched diagnostics from `unmatched`. Otherwise, return
-    /// `None`. If  the assertion is a `snapshot` assertion, return the diagnostic.
+    /// Only diagnostics accepted by `diagnostic_matches_assertion_range` are considered. If there
+    /// is a match, return it and remove the matched diagnostic from `unmatched`; otherwise return
+    /// `None`.
     ///
     /// An `Error` assertion can only match one diagnostic; even if it could match more than one,
     /// we short-circuit after the first match.
     ///
     /// A `Revealed` assertion must match a revealed-type diagnostic, and may also match an
     /// undefined-reveal diagnostic, if present.
-    fn matches_with_filter(
+    fn matches(
         &self,
         assertion: &ParsedAssertion,
-        unmatched: &mut Vec<&Diagnostic>,
+        unmatched: &mut Vec<Diagnostic>,
         diagnostic_matches_assertion_range: impl Fn(&Diagnostic) -> bool,
     ) -> Option<Diagnostic> {
         match assertion {
@@ -555,16 +384,20 @@ impl Matcher {
                     });
                     lint_name_matches && column_matches && message_matches
                 });
-                position.map(|position| unmatched.swap_remove(position).clone())
+                position.map(|position| unmatched.swap_remove(position))
             }
             ParsedAssertion::Snapshot(rule) => {
                 let Some(rule) = rule else {
                     // Similar to `error:` with the same diagnostic code. Match the first diagnostic even if this
                     // is ambiguous (and somewhat problematic because we use swap_remove in many places).
-                    return unmatched
+                    if let Some(position) = unmatched
                         .iter()
-                        .position(|diagnostic| diagnostic_matches_assertion_range(diagnostic))
-                        .map(|position| unmatched.swap_remove(position).clone());
+                        .position(diagnostic_matches_assertion_range)
+                    {
+                        return Some(unmatched.swap_remove(position));
+                    }
+
+                    return None;
                 };
 
                 if *rule == DiagnosticId::RevealedType.as_str() {
@@ -584,7 +417,7 @@ impl Matcher {
 
                             diagnostic.id().is_lint_named(rule) || diagnostic.id().as_str() == *rule
                         })
-                        .map(|position| unmatched.swap_remove(position).clone())
+                        .map(|position| unmatched.swap_remove(position))
                 }
             }
             ParsedAssertion::Revealed(expected_type) => {
@@ -602,10 +435,27 @@ impl Matcher {
     }
 }
 
+/// Match and remove the revealed-type diagnostic for a `# revealed` or
+/// `# snapshot revealed-type` assertion.
+///
+/// Revealed-type diagnostics use two formats. Diagnostics from `reveal_type`
+/// and `reveal_protocol_interface` wrap the revealed type in backticks, so they
+/// are checked against `expected_reveal_type_message`. Diagnostics from
+/// `reveal_when_assignable_to`, `reveal_when_subtype_of`, and `reveal_mro` store
+/// the type without those backticks, so they are checked against
+/// `expected_reveal_type`. Passing `None` for either expectation means that the
+/// format will be accepted without comparing the assertion content.
+///
+/// The passed-in closure `diagnostic_matches_assertion_range` determines whether
+/// a diagnostic falls within the range claimed by the assertion. If this
+/// function finds a matching `revealed-type` diagnostic in that range, it
+/// removes the diagnostic from `unmatched` and returns it. If an
+/// `undefined-reveal` diagnostic is accepted by the same range check, it is also
+/// removed: the same assertion accounts for both diagnostics.
 fn match_reveal_type_diagnostic(
     expected_reveal_type: Option<&str>,
     expected_reveal_type_message: Option<&str>,
-    unmatched: &mut Vec<&Diagnostic>,
+    unmatched: &mut Vec<Diagnostic>,
     diagnostic_matches_assertion_range: impl Fn(&Diagnostic) -> bool,
 ) -> Option<Diagnostic> {
     let diagnostic_matches_reveal = |diagnostic: &Diagnostic| {
@@ -723,7 +573,7 @@ mod tests {
         source: &str,
         expected_diagnostics: Vec<ExpectedDiagnostic>,
     ) -> Result<Vec<Diagnostic>, FailuresByLine> {
-        get_result_with_assertion_range_mapper(expected_diagnostics, source, |range| range)
+        get_result_with_assertion_range_mapper(expected_diagnostics, source, std::convert::identity)
     }
 
     fn get_result_with_assertion_range_mapper(
@@ -741,10 +591,10 @@ mod tests {
             .into_iter()
             .map(|diagnostic| diagnostic.into_diagnostic(file))
             .collect();
-        super::match_file_with_assertion_range_mapper(
+        super::match_file(
             &db,
             file,
-            &diagnostics,
+            diagnostics,
             map_assertion_range,
             |assertion_range, diagnostic_range| {
                 assertion_range.contains(diagnostic_range.start())

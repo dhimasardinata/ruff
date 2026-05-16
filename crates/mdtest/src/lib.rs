@@ -30,7 +30,6 @@ const MDTEST_UPDATE_SNAPSHOTS: &str = "MDTEST_UPDATE_SNAPSHOTS";
 const MDTEST_GITHUB_ANNOTATIONS_FORMAT: &str = "MDTEST_GITHUB_ANNOTATIONS_FORMAT";
 
 mod assertion;
-mod diagnostic;
 pub mod matcher;
 pub mod parser;
 
