@@ -52,6 +52,7 @@ pub enum KnownClass {
     FrozenSet,
     Dict,
     Slice,
+    Range,
     Property,
     BaseException,
     Exception,
@@ -215,6 +216,7 @@ impl KnownClass {
             | Self::Bytes
             | Self::Bytearray
             | Self::FrozenSet
+            | Self::Range
             | Self::Property
             | Self::SpecialForm
             | Self::Dict
@@ -284,6 +286,7 @@ impl KnownClass {
             | KnownClass::FrozenSet
             | KnownClass::Dict
             | KnownClass::Slice
+            | KnownClass::Range
             | KnownClass::Property
             | KnownClass::BaseException
             | KnownClass::NotImplementedError
@@ -379,6 +382,7 @@ impl KnownClass {
             | KnownClass::FrozenSet
             | KnownClass::Dict
             | KnownClass::Slice
+            | KnownClass::Range
             | KnownClass::Property
             | KnownClass::BaseException
             | KnownClass::Exception
@@ -474,6 +478,7 @@ impl KnownClass {
             | KnownClass::FrozenSet
             | KnownClass::Dict
             | KnownClass::Slice
+            | KnownClass::Range
             | KnownClass::Property
             | KnownClass::BaseException
             | KnownClass::Exception
@@ -588,6 +593,7 @@ impl KnownClass {
             | Self::List
             | Self::Type
             | Self::Slice
+            | Self::Range
             | Self::Property
             | Self::BaseException
             | Self::BaseExceptionGroup
@@ -679,6 +685,7 @@ impl KnownClass {
             | KnownClass::FrozenSet
             | KnownClass::Dict
             | KnownClass::Slice
+            | KnownClass::Range
             | KnownClass::Property
             | KnownClass::BaseException
             | KnownClass::Exception
@@ -772,6 +779,7 @@ impl KnownClass {
             Self::List => "list",
             Self::Type => "type",
             Self::Slice => "slice",
+            Self::Range => "range",
             Self::Property => "property",
             Self::BaseException => "BaseException",
             Self::BaseExceptionGroup => "BaseExceptionGroup",
@@ -1152,6 +1160,7 @@ impl KnownClass {
             | Self::Staticmethod
             | Self::Classmethod
             | Self::Slice
+            | Self::Range
             | Self::Super
             | Self::Property => KnownModule::Builtins,
             Self::VersionInfo => KnownModule::Sys,
@@ -1278,6 +1287,7 @@ impl KnownClass {
             | Self::FrozenSet
             | Self::Dict
             | Self::Slice
+            | Self::Range
             | Self::Property
             | Self::BaseException
             | Self::BaseExceptionGroup
@@ -1378,6 +1388,7 @@ impl KnownClass {
             | Self::List
             | Self::Type
             | Self::Slice
+            | Self::Range
             | Self::Property
             | Self::GenericAlias
             | Self::ModuleType
@@ -1473,6 +1484,7 @@ impl KnownClass {
             "dict" => &[Self::Dict],
             "list" => &[Self::List],
             "slice" => &[Self::Slice],
+            "range" => &[Self::Range],
             "property" => &[Self::Property],
             "BaseException" => &[Self::BaseException],
             "BaseExceptionGroup" => &[Self::BaseExceptionGroup],
@@ -1589,6 +1601,7 @@ impl KnownClass {
             | Self::FrozenSet
             | Self::Dict
             | Self::Slice
+            | Self::Range
             | Self::Property
             | Self::GenericAlias
             | Self::ChainMap
