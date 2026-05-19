@@ -3,6 +3,7 @@
     reason = "Prefer System trait methods over std methods in ty crates"
 )]
 use crate::glob::{GlobFilterCheckMode, IncludeResult};
+use crate::ignore::is_path_ignored_by_ignore_files;
 use crate::metadata::options::{OptionDiagnostic, ProgramSettingsDiagnostic};
 use crate::walk::{ProjectFilesFilter, ProjectFilesWalker};
 #[cfg(feature = "testing")]
@@ -17,7 +18,7 @@ use ruff_db::diagnostic::{
 };
 use ruff_db::files::{File, FileRootKind};
 use ruff_db::parsed::parsed_module;
-use ruff_db::system::{SystemPath, SystemPathBuf};
+use ruff_db::system::{SystemPath, SystemPathBuf, deduplicate_nested_paths};
 use rustc_hash::FxHashSet;
 use salsa::{Database, Durability, Setter};
 use std::backtrace::BacktraceStatus;
@@ -30,6 +31,7 @@ use ty_python_semantic::lint::RuleSelection;
 mod db;
 mod files;
 pub mod glob;
+mod ignore;
 pub mod metadata;
 mod walk;
 pub mod watch;
@@ -240,6 +242,33 @@ impl Project {
                 .is_directory_included(path, GlobFilterCheckMode::Adhoc),
             IncludeResult::Included { .. }
         )
+    }
+
+    /// Returns `true` if `path` is both part of the project and would be indexed as a project file.
+    ///
+    /// Unlike [`Self::is_file_included`], this also respects ignore files when
+    /// `src.respect-ignore-files` is enabled.
+    pub fn is_file_included_and_not_ignored(self, db: &dyn Db, path: &SystemPath) -> bool {
+        self.is_file_included(db, path) && self.is_path_not_ignored_by_ignore_files(db, path, false)
+    }
+
+    /// Returns `true` if `path` is both part of the project and would be walked as a project directory.
+    ///
+    /// Unlike [`Self::is_directory_included`], this also respects ignore files when
+    /// `src.respect-ignore-files` is enabled.
+    pub fn is_directory_included_and_not_ignored(self, db: &dyn Db, path: &SystemPath) -> bool {
+        self.is_directory_included(db, path)
+            && self.is_path_not_ignored_by_ignore_files(db, path, true)
+    }
+
+    fn is_path_not_ignored_by_ignore_files(
+        self,
+        db: &dyn Db,
+        path: &SystemPath,
+        is_directory: bool,
+    ) -> bool {
+        !self.settings(db).src().respect_ignore_files
+            || !is_path_ignored_by_ignore_files(db.system(), path, is_directory)
     }
 
     /// Reload the project after its metadata or settings have changed.
@@ -602,10 +631,12 @@ impl Project {
         I: IntoIterator<Item = P>,
         P: AsRef<SystemPath>,
     {
-        let paths = paths
-            .into_iter()
-            .map(|path| SystemPath::absolute(path, db.system().current_directory()))
-            .collect::<BTreeSet<_>>();
+        let paths = deduplicate_nested_paths(
+            paths
+                .into_iter()
+                .map(|path| SystemPath::absolute(path, db.system().current_directory())),
+        )
+        .collect::<BTreeSet<_>>();
 
         if paths.is_empty() {
             return;
@@ -622,9 +653,10 @@ impl Project {
                 .copied()
                 .filter(|file| {
                     file.path(db).as_system_path().is_some_and(|file_path| {
-                        file_path
-                            .ancestors()
-                            .any(|ancestor| paths.contains(ancestor))
+                        paths
+                            .range(..=file_path.to_path_buf())
+                            .next_back()
+                            .is_some_and(|path| file_path.starts_with(path))
                     })
                 })
                 .collect::<Vec<_>>()
@@ -867,6 +899,7 @@ where
 mod tests {
     use crate::ProjectMetadata;
     use crate::check_file_impl;
+    use crate::db::Db as _;
     use crate::db::tests::TestDb;
     use ruff_db::files::system_path_to_file;
     use ruff_db::source::source_text;
@@ -916,6 +949,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![] as Vec<String>
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn ignore_aware_inclusion_respects_local_ignore_files() -> ruff_db::system::Result<()> {
+        let project =
+            ProjectMetadata::new(Name::new_static("test"), SystemPathBuf::from("/project"));
+        let mut db = TestDb::new(project);
+        let project = db.project();
+
+        let ignored_directory = SystemPath::new("/project/a/b");
+        let ignored_file = SystemPath::new("/project/a/b/c.py");
+        let included_file = SystemPath::new("/project/a/bar.py");
+
+        db.write_file(SystemPath::new("/project/a/.ignore"), "b/\n")?;
+        db.write_file(ignored_file, "print('c')\n")?;
+        db.write_file(included_file, "print('bar')\n")?;
+
+        assert!(project.is_file_included(&db, ignored_file));
+        assert!(project.is_directory_included(&db, ignored_directory));
+        assert!(!project.is_file_included_and_not_ignored(&db, ignored_file));
+        assert!(!project.is_directory_included_and_not_ignored(&db, ignored_directory));
+        assert!(project.is_file_included_and_not_ignored(&db, included_file));
 
         Ok(())
     }
