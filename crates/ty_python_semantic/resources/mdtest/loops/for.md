@@ -1476,14 +1476,13 @@ reveal_type(loop_only)  # revealed: int
 def random() -> bool:
     return False
 
-def dynamic_count() -> int:
-    return 1_000_000
+def iterable() -> list[int]:
+    return []
 
-count = dynamic_count()
 x = "A"
-for _ in range(count):
+for _ in iterable():
     reveal_type(x)  # revealed: Literal["A", "D"]
-    for _ in range(count):
+    for _ in iterable():
         # The "C" binding isn't visible here. It breaks this inner loop, and it always gets
         # overwritten before the end of the outer loop.
         reveal_type(x)  # revealed: Literal["A", "D", "B"]
@@ -1555,12 +1554,11 @@ On the other hand, if `x` is defined before the loop, the `del` makes it a
 `[possibly-unresolved-reference]`:
 
 ```py
-def dynamic_count() -> int:
-    return 1_000_000
+def iterable() -> list[int]:
+    return []
 
-count = dynamic_count()
 x = 0
-for _ in range(count):
+for _ in iterable():
     x  # error: [possibly-unresolved-reference]
     x = 42
     del x
@@ -1569,12 +1567,11 @@ for _ in range(count):
 ### `del` in a loop makes a variable possibly-unbound after the loop
 
 ```py
-def dynamic_count() -> int:
-    return 1_000_000
+def iterable() -> list[int]:
+    return []
 
-count = dynamic_count()
 x = 0
-for _ in range(count):
+for _ in iterable():
     # error: [possibly-unresolved-reference]
     del x
 # error: [possibly-unresolved-reference]
@@ -1584,11 +1581,10 @@ x
 ### Bindings in a loop are possibly-unbound after the loop
 
 ```py
-def dynamic_count() -> int:
-    return 1_000_000
+def iterable() -> list[int]:
+    return []
 
-count = dynamic_count()
-for _ in range(count):
+for _ in iterable():
     x = 42
 # error: [possibly-unresolved-reference]
 x
@@ -1643,15 +1639,15 @@ for _ in range(1_000_000):
         x = 2
 ```
 
-### Unrelated large reachability constraint graphs do not force loop headers to `Unknown`
+### Large reachability constraint graphs fall back to `Unknown`
 
 ```py
 def f(items, flags):
     x = 1
     for item in items:
-        # This function's full reachability graph is large, but this loop header only depends on
-        # the bindings in this loop.
-        reveal_type(x)  # revealed: Literal[1, 2]
+        # This example is over the exact loop-header reachability cutoff. If it falls below the
+        # cutoff, this line reveals `Literal[1, 2]`.
+        reveal_type(x)  # revealed: Literal[1] | Unknown
         if flags[200]:
             x = 2
     for item0 in items:
