@@ -558,38 +558,9 @@ impl<'db> ReachabilityConstraintsExtension<'db> for ReachabilityConstraints {
         &self,
         db: &'db dyn Db,
         predicates: &Predicates<'db>,
-        mut id: ScopedReachabilityConstraintId,
+        id: ScopedReachabilityConstraintId,
     ) -> Truthiness {
-        type Id = ScopedReachabilityConstraintId;
-
-        loop {
-            let node = match id {
-                Id::ALWAYS_TRUE => return Truthiness::AlwaysTrue,
-                Id::AMBIGUOUS => return Truthiness::Ambiguous,
-                Id::ALWAYS_FALSE => return Truthiness::AlwaysFalse,
-                _ => {
-                    // `id` gives us the index of this node in the IndexVec that we used when
-                    // constructing this BDD. When finalizing the builder, we threw away any
-                    // interior nodes that weren't marked as used. The `used_indices` bit vector
-                    // lets us verify that this node was marked as used, and the rank of that bit
-                    // in the bit vector tells us where this node lives in the "condensed"
-                    // `used_interiors` vector.
-                    let raw_index = id.as_u32() as usize;
-                    debug_assert!(
-                        self.used_indices().get_bit(raw_index).unwrap_or(false),
-                        "all used reachability constraints should have been marked as used",
-                    );
-                    let index = self.used_indices().rank(raw_index) as usize;
-                    self.used_interiors()[index]
-                }
-            };
-            let predicate = &predicates[node.atom()];
-            match analyze_single(db, predicate) {
-                Truthiness::AlwaysTrue => id = node.if_true(),
-                Truthiness::Ambiguous => id = node.if_ambiguous(),
-                Truthiness::AlwaysFalse => id = node.if_false(),
-            }
-        }
+        ReachabilityEvaluator::from_parts(db, self, predicates).evaluate(id)
     }
 }
 
@@ -1154,31 +1125,104 @@ pub(crate) fn evaluate_reachability(
     use_def: &UseDefMap,
     reachability: ScopedReachabilityConstraintId,
 ) -> Truthiness {
-    use_def
-        .reachability_constraints()
-        .evaluate(db, use_def.predicates(), reachability)
+    ReachabilityEvaluator::new(db, use_def).evaluate(reachability)
 }
 
-/// Returns the reachability graph size to use for loop-header exactness cutoffs.
-///
-/// `IsNonEmptyIterable` predicates are emitted for every `for` loop because deciding whether the
-/// iterable is a known `range` is semantic, not syntactic. They do not narrow any places, and for
-/// non-`range` iterables they collapse to the ambiguous branch during reachability evaluation, so
-/// they should not by themselves force loop-header inference to fall back to `Unknown`.
-pub(crate) fn loop_header_reachability_node_count(use_def: &UseDefMap) -> usize {
-    let predicates = use_def.predicates();
+pub(crate) struct ReachabilityEvaluator<'a, 'db> {
+    db: &'db dyn Db,
+    constraints: &'a ReachabilityConstraints,
+    predicates: &'a Predicates<'db>,
+    cache: FxHashMap<ScopedPredicateId, Truthiness>,
+}
 
-    use_def
-        .reachability_constraints()
-        .used_interiors()
-        .iter()
-        .filter(|node| {
-            !matches!(
-                predicates[node.atom()].node,
-                PredicateNode::IsNonEmptyIterable(_)
-            )
-        })
-        .count()
+impl<'a, 'db> ReachabilityEvaluator<'a, 'db> {
+    pub(crate) fn new(db: &'db dyn Db, use_def: &'a UseDefMap<'db>) -> Self {
+        Self::from_parts(db, use_def.reachability_constraints(), use_def.predicates())
+    }
+
+    fn from_parts(
+        db: &'db dyn Db,
+        constraints: &'a ReachabilityConstraints,
+        predicates: &'a Predicates<'db>,
+    ) -> Self {
+        Self {
+            db,
+            constraints,
+            predicates,
+            cache: FxHashMap::default(),
+        }
+    }
+
+    pub(crate) fn evaluate(&mut self, mut id: ScopedReachabilityConstraintId) -> Truthiness {
+        type Id = ScopedReachabilityConstraintId;
+
+        loop {
+            let node = match id {
+                Id::ALWAYS_TRUE => return Truthiness::AlwaysTrue,
+                Id::AMBIGUOUS => return Truthiness::Ambiguous,
+                Id::ALWAYS_FALSE => return Truthiness::AlwaysFalse,
+                _ => self.constraints.get_interior_node(id),
+            };
+
+            match self.predicate_truthiness(node.atom()) {
+                Truthiness::AlwaysTrue => id = node.if_true(),
+                Truthiness::Ambiguous => id = node.if_ambiguous(),
+                Truthiness::AlwaysFalse => id = node.if_false(),
+            }
+        }
+    }
+
+    pub(crate) fn count_loop_header_nodes(
+        &mut self,
+        roots: impl IntoIterator<Item = ScopedReachabilityConstraintId>,
+    ) -> usize {
+        let mut seen = FxHashSet::default();
+        for root in roots {
+            self.count_loop_header_nodes_impl(root, &mut seen);
+        }
+        seen.len()
+    }
+
+    /// Counts the nodes that remain relevant to the loop-header cutoff after projecting
+    /// `IsNonEmptyIterable` predicates through their semantic truthiness.
+    ///
+    /// These predicates are recorded for every `for` loop because the semantic index cannot know
+    /// whether the iterable is a known `range`. Once type inference can answer that question, a
+    /// non-`range` iterable contributes only the ambiguous branch and should not make unrelated
+    /// loop-carried bindings fall back to `Unknown`.
+    fn count_loop_header_nodes_impl(
+        &mut self,
+        id: ScopedReachabilityConstraintId,
+        seen: &mut FxHashSet<ScopedReachabilityConstraintId>,
+    ) {
+        if id.is_terminal() {
+            return;
+        }
+
+        let node = self.constraints.get_interior_node(id);
+        if matches!(
+            self.predicates[node.atom()].node,
+            PredicateNode::IsNonEmptyIterable(_)
+        ) {
+            let branch = match self.predicate_truthiness(node.atom()) {
+                Truthiness::AlwaysTrue => node.if_true(),
+                Truthiness::Ambiguous => node.if_ambiguous(),
+                Truthiness::AlwaysFalse => node.if_false(),
+            };
+            self.count_loop_header_nodes_impl(branch, seen);
+        } else if seen.insert(id) {
+            self.count_loop_header_nodes_impl(node.if_true(), seen);
+            self.count_loop_header_nodes_impl(node.if_ambiguous(), seen);
+            self.count_loop_header_nodes_impl(node.if_false(), seen);
+        }
+    }
+
+    fn predicate_truthiness(&mut self, atom: ScopedPredicateId) -> Truthiness {
+        *self
+            .cache
+            .entry(atom)
+            .or_insert_with(|| analyze_single(self.db, &self.predicates[atom]))
+    }
 }
 
 pub(crate) trait DeclarationsIteratorExtension<'db> {
