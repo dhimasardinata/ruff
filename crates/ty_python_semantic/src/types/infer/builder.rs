@@ -405,10 +405,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         self.expressions
             .extend(inference.expressions.iter().copied());
-        self.declarations.extend(inference.declarations());
+        self.declarations.extend_unique(inference.declarations());
 
         if !matches!(self.region, InferenceRegion::Scope(..)) {
-            self.bindings.extend(inference.bindings());
+            self.bindings.extend_unique(inference.bindings());
         }
 
         if let Some(extra) = &inference.extra {
@@ -438,10 +438,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         self.expressions
             .extend(inference.expressions.iter().copied());
-        self.declarations.extend(inference.declarations());
+        self.declarations.extend_unique(inference.declarations());
 
         if !matches!(self.region, InferenceRegion::Scope(..)) {
-            self.bindings.extend(inference.bindings());
+            self.bindings.extend_unique(inference.bindings());
         }
 
         if let Some(extra) = &inference.extra {
@@ -480,7 +480,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 .extend(extra.type_expression_flags.iter());
 
             if !matches!(self.region, InferenceRegion::Scope(..)) {
-                self.bindings.extend(extra.bindings.iter().copied());
+                self.bindings.extend_unique(extra.bindings.iter().copied());
             }
         }
     }
@@ -1059,6 +1059,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             }
             DefinitionKind::ParamSpec(paramspec) => {
                 self.infer_paramspec_deferred(paramspec.node(self.module()));
+            }
+            DefinitionKind::TypeVarTuple(typevartuple) => {
+                self.infer_typevartuple_deferred(typevartuple.node(self.module()));
             }
             DefinitionKind::Assignment(assignment) => {
                 self.infer_assignment_deferred(
@@ -3481,6 +3484,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                 definition,
                                 paramspec_class,
                             ),
+                            Some(KnownClass::TypeVarTuple) => {
+                                self.infer_legacy_typevartuple(target, call_expr, definition)
+                            }
                             Some(KnownClass::NewType) => {
                                 self.infer_newtype_expression(target, call_expr, definition)
                             }
@@ -3763,6 +3769,12 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             && function.is_known(self.db(), KnownFunction::NewClass)
         {
             self.infer_new_class_deferred(definition, value);
+            return;
+        }
+        if matches!(known_class, Some(KnownClass::TypeVarTuple)) {
+            if let Some(default) = arguments.find_keyword("default") {
+                self.infer_typevartuple_default(&default.value, None);
+            }
             return;
         }
         let mut constraint_tys = Vec::new();
@@ -7688,6 +7700,16 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         );
                     }
                 }
+                Some(KnownClass::TypeVarTuple) => {
+                    if let Some(builder) = self
+                        .context
+                        .report_lint(&INVALID_LEGACY_TYPE_VARIABLE, call_expression)
+                    {
+                        builder.into_diagnostic(
+                            "A `TypeVarTuple` definition must be a simple variable assignment",
+                        );
+                    }
+                }
                 Some(KnownClass::NewType) => {
                     if let Some(builder) =
                         self.context.report_lint(&INVALID_NEWTYPE, call_expression)
@@ -7866,6 +7888,33 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         let db = self.db();
         let iterable_type = self.infer_expression(value, tcx);
+        if let Type::KnownInstance(KnownInstanceType::TypeVar(typevar)) = iterable_type
+            && typevar.is_typevartuple(db)
+            && let Some(bound_typevar) = bind_typevar(
+                db,
+                self.index,
+                self.scope().file_scope_id(db),
+                self.typevar_binding_context,
+                typevar,
+            )
+        {
+            return Type::tuple(TupleType::new(
+                db,
+                &TupleSpecBuilder::with_capacity(0)
+                    .concat_variadic_typevar(db, bound_typevar)
+                    .build(),
+            ));
+        }
+        if let Type::TypeVar(typevar) = iterable_type
+            && typevar.is_typevartuple(db)
+        {
+            return Type::tuple(TupleType::new(
+                db,
+                &TupleSpecBuilder::with_capacity(0)
+                    .concat_variadic_typevar(db, typevar)
+                    .build(),
+            ));
+        }
         iterable_type
             .try_iterate(db)
             .map(|spec| Type::tuple(TupleType::new(db, &spec)))
@@ -10226,6 +10275,29 @@ where
             }
         } else {
             self.0.extend(iter);
+        }
+    }
+}
+
+impl<K, V> VecMap<K, V>
+where
+    K: Eq,
+    K: std::fmt::Debug,
+    V: std::fmt::Debug,
+{
+    fn insert_unique(&mut self, key: K, value: V) {
+        // Cached inference regions can overlap when a nested definition is reached through
+        // multiple paths, for example a named expression in the shared RHS of a multi-target
+        // assignment. Region lookups use the first entry, so preserve that behavior when merging.
+        if !self.0.iter().any(|(existing_key, _)| existing_key == &key) {
+            self.0.push((key, value));
+        }
+    }
+
+    #[inline]
+    fn extend_unique<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
+        for (key, value) in iter {
+            self.insert_unique(key, value);
         }
     }
 }
