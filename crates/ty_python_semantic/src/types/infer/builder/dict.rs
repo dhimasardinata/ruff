@@ -23,11 +23,36 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         // Fast-path dict(...) in TypedDict context: infer keyword values against fields,
         // then validate and return the TypedDict type. This also covers `dict(**src)` when `src`
         // is `TypedDict`-shaped.
-        if let Some(tcx) = call_expression_tcx.annotation
-            && let Some(typed_dict) = tcx
-                .filter_union(self.db(), Type::is_typed_dict)
-                .as_typed_dict()
-        {
+        let typed_dict = call_expression_tcx.annotation.and_then(|annotation| {
+            match annotation.resolve_type_alias(self.db()) {
+                Type::TypedDict(typed_dict) => Some(typed_dict),
+                Type::Union(union) => {
+                    let union_elements = union.elements(self.db());
+                    let typed_dicts = union_elements
+                        .iter()
+                        .filter_map(|element| element.resolve_type_alias(self.db()).as_typed_dict())
+                        .collect_vec();
+                    let dict_fallback = KnownClass::Dict
+                        .to_specialized_instance(self.db(), &[Type::unknown(), Type::unknown()]);
+                    let has_dict_compatible_fallback = union_elements.iter().any(|element| {
+                        let element = element.resolve_type_alias(self.db());
+                        !element.is_typed_dict()
+                            && dict_fallback.is_assignable_to(self.db(), element)
+                    });
+
+                    if let [typed_dict] = typed_dicts.as_slice()
+                        && !has_dict_compatible_fallback
+                    {
+                        Some(*typed_dict)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        });
+
+        if let Some(typed_dict) = typed_dict {
             // Only speculate the `**kwargs` applicability check. Assignability handles inputs that
             // are already valid for the target, including gradual and bottom types. The additional
             // TypedDict-shape check keeps invalid-but-analyzable unpacks on this path so validation

@@ -210,6 +210,11 @@ type TypedDictOrMapping = TD | Mapping[int, float]
 # The `dict[int, float]` fallback should still win when it is wrapped in an alias.
 d7_alias_fallback: TypedDictOrDictAlias = {1: 5.2}
 d8_mapping_fallback: TypedDictOrMapping = {1: 5.2}
+d9_direct_dict_call_fallback: TD | dict[int, float] = dict()
+d10_alias_dict_call_fallback: TypedDictOrDictAlias = dict()
+
+# error: [invalid-assignment]
+d11_invalid_mapping_fallback: TypedDictOrMapping = {1: "1"}
 
 def return_literal() -> TD:
     return {"x": 1}

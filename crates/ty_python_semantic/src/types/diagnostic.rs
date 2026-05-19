@@ -3591,11 +3591,29 @@ pub(crate) fn is_invalid_typed_dict_literal(
     target_ty: Type,
     source: AnyNodeRef<'_>,
 ) -> bool {
-    target_ty
-        .filter_union(db, Type::is_typed_dict)
-        .as_typed_dict()
-        .is_some()
-        && matches!(source, AnyNodeRef::ExprDict(_))
+    if !matches!(source, AnyNodeRef::ExprDict(_)) {
+        return false;
+    }
+
+    match target_ty.resolve_type_alias(db) {
+        Type::TypedDict(_) => true,
+        Type::Union(union) => {
+            let union_elements = union.elements(db);
+            let typed_dicts = union_elements
+                .iter()
+                .filter_map(|element| element.resolve_type_alias(db).as_typed_dict())
+                .collect_vec();
+            let dict_fallback =
+                KnownClass::Dict.to_specialized_instance(db, &[Type::unknown(), Type::unknown()]);
+            let has_dict_compatible_fallback = union_elements.iter().any(|element| {
+                let element = element.resolve_type_alias(db);
+                !element.is_typed_dict() && dict_fallback.is_assignable_to(db, element)
+            });
+
+            matches!(typed_dicts.as_slice(), [_]) && !has_dict_compatible_fallback
+        }
+        _ => false,
+    }
 }
 
 fn report_invalid_assignment_with_message<'db, 'ctx: 'db, T: Ranged>(
