@@ -14,6 +14,7 @@ use salsa::plumbing::AsId;
 use smallvec::SmallVec;
 use ty_module_resolver::ModuleName;
 
+use crate::frozen::{FrozenMap, FrozenSet};
 use crate::place::ScopedPlaceId;
 pub use crate::statement::{Statement, StatementNodeKey};
 use ast_ids::AstIds;
@@ -39,6 +40,7 @@ mod builder;
 mod db;
 pub mod definition;
 pub mod expression;
+pub mod frozen;
 pub(crate) mod member;
 pub mod narrowing_constraints;
 pub mod node_key;
@@ -267,19 +269,19 @@ pub struct SemanticIndex<'db> {
     scopes_by_expression: ExpressionsScopeMap,
 
     /// Map from a node creating a definition to its definition.
-    definitions_by_node: FxHashMap<DefinitionNodeKey, Definitions<'db>>,
+    definitions_by_node: FrozenMap<DefinitionNodeKey, Definitions<'db>>,
 
     /// Map from a standalone expression to its [`Expression`] ingredient.
-    expressions_by_node: FxHashMap<ExpressionNodeKey, Expression<'db>>,
+    expressions_by_node: FrozenMap<ExpressionNodeKey, Expression<'db>>,
 
     /// Map from a standalone statement to its [`Statement`] ingredient.
-    statements_by_node: FxHashMap<StatementNodeKey, Statement<'db>>,
+    statements_by_node: FrozenMap<StatementNodeKey, Statement<'db>>,
 
     /// Map from nodes that create a scope to the scope they create.
-    scopes_by_node: FxHashMap<NodeWithScopeKey, FileScopeId>,
+    scopes_by_node: FrozenMap<NodeWithScopeKey, FileScopeId>,
 
     /// Map from a lambda expression to its containing statement.
-    enclosing_lambda_statements: FxHashMap<ExpressionNodeKey, Statement<'db>>,
+    enclosing_lambda_statements: FrozenMap<ExpressionNodeKey, Statement<'db>>,
 
     /// Map from the file-local [`FileScopeId`] to the salsa-ingredient [`ScopeId`].
     scope_ids_by_scope: IndexVec<FileScopeId, ScopeId<'db>>,
@@ -294,24 +296,24 @@ pub struct SemanticIndex<'db> {
     ast_ids: IndexVec<FileScopeId, AstIds>,
 
     /// The set of modules that are imported anywhere within this file.
-    imported_modules: Arc<FxHashSet<ModuleName>>,
+    imported_modules: Arc<FrozenSet<ModuleName>>,
 
     /// Flags about the global scope (code usage impacting inference)
     has_future_annotations: bool,
 
     /// Map of all of the enclosing snapshots that appear in this file.
-    enclosing_snapshots: FxHashMap<EnclosingSnapshotKey, ScopedEnclosingSnapshotId>,
+    enclosing_snapshots: FrozenMap<EnclosingSnapshotKey, ScopedEnclosingSnapshotId>,
 
     /// List of all semantic syntax errors in this file.
     semantic_syntax_errors: Vec<SemanticSyntaxError>,
 
     /// Set of all generator functions in this file.
-    generator_functions: FxHashSet<FileScopeId>,
+    generator_functions: FrozenSet<FileScopeId>,
 
     /// Narrowing alias metadata for predicate leaf names.
     /// When a predicate references an alias variable (e.g., `is_none` from `is_none = x is None`),
     /// the alias Name node is mapped to its aliased expression for constraint-generation time.
-    narrowing_alias_predicates: FxHashMap<ExpressionNodeKey, NarrowingAliasPredicate<'db>>,
+    narrowing_alias_predicates: FrozenMap<ExpressionNodeKey, NarrowingAliasPredicate<'db>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
@@ -352,8 +354,8 @@ impl<'db> SemanticIndex<'db> {
     /// This set only considers `import` statements, not `from...import` statements.
     /// See `ModuleLiteralType::available_submodule_attributes` for discussion
     /// of why this analysis is intentionally limited.
-    pub fn imported_modules(&self) -> &FxHashSet<ModuleName> {
-        &self.imported_modules
+    pub fn imported_modules(&self) -> impl Iterator<Item = &ModuleName> {
+        self.imported_modules.iter()
     }
 
     #[track_caller]
